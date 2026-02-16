@@ -49,8 +49,13 @@ def get_iptable_rules(duthost, ip_netns_namespace_prefix):
 @pytest.fixture(scope="module", autouse=True)
 def restore_test_env(duthosts, rand_one_dut_front_end_hostname):
     duthost = duthosts[rand_one_dut_front_end_hostname]
+    duthost.shell("cp /etc/sonic/config_db.json /etc/sonic/config_db.json.before_cacl")
     config_reload(duthost, config_source="minigraph", safe_reload=True)
     yield
+    logger.info("Restoring original config_db.json after test_cacl module")
+    duthost.shell("cp /etc/sonic/config_db.json.before_cacl /etc/sonic/config_db.json")
+    config_reload(duthost, safe_reload=True)
+    duthost.shell("rm -f /etc/sonic/config_db.json.before_cacl")
 
 
 @pytest.fixture(scope="module", autouse=True)

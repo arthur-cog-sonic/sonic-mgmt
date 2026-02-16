@@ -11,6 +11,7 @@ import six
 import socket
 
 from jinja2 import Template
+from tests.bgp.constants import SHOW_IP_INTERFACE_CMD
 from tests.common.helpers.assertions import pytest_assert as pt_assert
 from tests.common.helpers.generators import generate_ips
 from tests.common.helpers.parallel import parallel_run
@@ -186,9 +187,13 @@ def setup_bgp_graceful_restart(duthosts, rand_one_dut_hostname, nbrhosts, tbinfo
         err_msg = "not all bgp sessions are up after enable graceful restart"
 
     is_backend_topo = "backend" in tbinfo["topo"]["name"]
-    if not is_backend_topo and res and not wait_until(100, 5, 0, duthost.check_bgp_default_route):
+    is_v6_topo = is_ipv6_only_topology(tbinfo)
+    if not is_backend_topo and res and not wait_until(100, 5, 0, duthost.check_bgp_default_route, ipv4=not is_v6_topo):
         res = False
-        err_msg = "ipv4 or ipv6 bgp default route not available"
+        if is_v6_topo:
+            err_msg = "ipv6 bgp default route not available for v6 topology"
+        else:
+            err_msg = "ipv4 or ipv6 bgp default route not available"
 
     if not res:
         # Disable graceful restart in case of failure
@@ -823,3 +828,13 @@ def traffic_shift_community(duthost):
 @pytest.fixture(scope='module')
 def get_function_completeness_level(pytestconfig):
     return pytestconfig.getoption("--completeness_level")
+
+
+@pytest.fixture(scope='module')
+def ip_version(tbinfo):
+    return 'v6' if is_ipv6_only_topology(tbinfo) else 'v4'
+
+
+@pytest.fixture(scope='module')
+def show_ip_interface_cmd(ip_version):
+    return SHOW_IP_INTERFACE_CMD[ip_version]
