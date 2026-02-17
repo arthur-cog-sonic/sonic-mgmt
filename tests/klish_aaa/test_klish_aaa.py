@@ -11,9 +11,8 @@ pytestmark = [
 
 logger = logging.getLogger(__name__)
 
-AAA_TABLE = "AAA"
-AAA_KEY = "authentication"
 SHOW_AAA_CMD = "show aaa"
+AAA_KEYS = ["authentication", "authorization", "accounting"]
 
 
 def is_mgmt_framework_running(duthost):
@@ -32,16 +31,21 @@ def run_klish_command(duthost, command):
     return result
 
 
-def get_aaa_config_db(duthost):
-    result = duthost.shell('sonic-db-cli CONFIG_DB HGETALL "AAA|authentication"',
-                           module_ignore_errors=True)
-    if result['rc'] != 0 or not result['stdout'].strip():
-        return {}
-    lines = result['stdout'].strip().split('\n')
-    config = {}
-    for i in range(0, len(lines) - 1, 2):
-        config[lines[i]] = lines[i + 1]
-    return config
+def get_aaa_config_db_all(duthost):
+    saved = {}
+    for key in AAA_KEYS:
+        result = duthost.shell(
+            'sonic-db-cli CONFIG_DB HGETALL "AAA|{}"'.format(key),
+            module_ignore_errors=True
+        )
+        if result['rc'] == 0 and result['stdout'].strip():
+            lines = result['stdout'].strip().split('\n')
+            fields = {}
+            for i in range(0, len(lines) - 1, 2):
+                fields[lines[i]] = lines[i + 1]
+            if fields:
+                saved[key] = fields
+    return saved
 
 
 def get_aaa_table_field(duthost, table_key, field):
@@ -124,15 +128,15 @@ def rest_api_call(duthost, method, path, body=None):
 @pytest.fixture(autouse=True)
 def save_and_restore_aaa(duthosts, rand_one_dut_hostname):
     duthost = duthosts[rand_one_dut_hostname]
-    saved_config = get_aaa_config_db(duthost)
+    saved_config = get_aaa_config_db_all(duthost)
     logger.info("Saved AAA config: %s", saved_config)
 
     yield
 
     del_aaa_table(duthost)
-    if saved_config:
-        for field, value in saved_config.items():
-            set_aaa_config(duthost, "authentication", field, value)
+    for key, fields in saved_config.items():
+        for field, value in fields.items():
+            set_aaa_config(duthost, key, field, value)
     logger.info("Restored AAA config")
 
 
