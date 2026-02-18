@@ -22,10 +22,11 @@ def is_mgmt_framework_running(duthost):
 
 
 def run_klish_command(duthost, command):
+    escaped = command.replace('\n', '\\n')
     result = duthost.shell(
         "docker exec mgmt-framework bash -c "
-        "\"source /usr/sbin/cli/klish/clish_start && "
-        "echo '{}' | /usr/sbin/cli/clish -o 2>/dev/null\"".format(command),
+        "\"source /usr/sbin/cli/klish/clish_start 2>/dev/null || true; "
+        "echo -e '{}' | clish -o 2>&1\"".format(escaped),
         module_ignore_errors=True
     )
     return result
@@ -111,13 +112,14 @@ def parse_show_aaa(output):
 def rest_api_call(duthost, method, path, body=None):
     base_url = "https://localhost:8443"
     url = "{}{}".format(base_url, path)
+    auth_header = "-H 'Authorization: Bearer' "
     if method == "GET":
-        cmd = "curl -sk -X GET '{}'".format(url)
+        cmd = "curl -sk {}-X GET '{}'".format(auth_header, url)
     elif method == "PATCH":
-        cmd = "curl -sk -X PATCH '{}' -H 'Content-Type: application/json' -d '{}'".format(
-            url, json.dumps(body))
+        cmd = "curl -sk {}-X PATCH '{}' -H 'Content-Type: application/json' -d '{}'".format(
+            auth_header, url, json.dumps(body))
     elif method == "DELETE":
-        cmd = "curl -sk -X DELETE '{}'".format(url)
+        cmd = "curl -sk {}-X DELETE '{}'".format(auth_header, url)
     else:
         pytest.fail("Unsupported HTTP method: {}".format(method))
 
@@ -546,6 +548,98 @@ class TestAAAKlishCLI:
                 "CONFIG_DB login should contain tacacs+ and local, got: {}".format(val)
             )
 
+    def test_klish_config_fallback_enable(self, duthost, mgmt_framework_available):
+        del_aaa_config(duthost, "authentication", "fallback")
+        result = run_klish_command(duthost, "configure terminal\naaa authentication fallback enable\nexit")
+        logger.info("Klish fallback enable: rc=%s, stdout=%s", result['rc'], result['stdout'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "fallback")
+        pytest_assert(val == "True",
+                      "CONFIG_DB fallback should be True after Klish command, got: {}".format(val))
+
+    def test_klish_config_fallback_disable(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "fallback", "True")
+        result = run_klish_command(duthost, "configure terminal\naaa authentication fallback disable\nexit")
+        logger.info("Klish fallback disable: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "fallback")
+        pytest_assert(val == "False",
+                      "CONFIG_DB fallback should be False after Klish command, got: {}".format(val))
+
+    def test_klish_config_debug_enable(self, duthost, mgmt_framework_available):
+        del_aaa_config(duthost, "authentication", "debug")
+        result = run_klish_command(duthost, "configure terminal\naaa authentication debug enable\nexit")
+        logger.info("Klish debug enable: rc=%s, stdout=%s", result['rc'], result['stdout'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "debug")
+        pytest_assert(val == "True",
+                      "CONFIG_DB debug should be True after Klish command, got: {}".format(val))
+
+    def test_klish_config_debug_disable(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "debug", "True")
+        result = run_klish_command(duthost, "configure terminal\naaa authentication debug disable\nexit")
+        logger.info("Klish debug disable: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "debug")
+        pytest_assert(val == "False",
+                      "CONFIG_DB debug should be False after Klish command, got: {}".format(val))
+
+    def test_klish_config_trace_enable(self, duthost, mgmt_framework_available):
+        del_aaa_config(duthost, "authentication", "trace")
+        result = run_klish_command(duthost, "configure terminal\naaa authentication trace enable\nexit")
+        logger.info("Klish trace enable: rc=%s, stdout=%s", result['rc'], result['stdout'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "trace")
+        pytest_assert(val == "True",
+                      "CONFIG_DB trace should be True after Klish command, got: {}".format(val))
+
+    def test_klish_config_trace_disable(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "trace", "True")
+        result = run_klish_command(duthost, "configure terminal\naaa authentication trace disable\nexit")
+        logger.info("Klish trace disable: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "trace")
+        pytest_assert(val == "False",
+                      "CONFIG_DB trace should be False after Klish command, got: {}".format(val))
+
+    def test_klish_config_authorization(self, duthost, mgmt_framework_available):
+        del_aaa_config(duthost, "authorization", "login")
+        result = run_klish_command(
+            duthost,
+            "configure terminal\naaa authorization tacacs+ local\nexit"
+        )
+        logger.info("Klish authorization: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authorization", "login")
+        if val is not None:
+            pytest_assert(
+                "tacacs+" in val and "local" in val,
+                "CONFIG_DB authorization login should contain tacacs+ and local, got: {}".format(val)
+            )
+
+    def test_klish_config_accounting(self, duthost, mgmt_framework_available):
+        del_aaa_config(duthost, "accounting", "login")
+        result = run_klish_command(
+            duthost,
+            "configure terminal\naaa accounting tacacs+ local\nexit"
+        )
+        logger.info("Klish accounting: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "accounting", "login")
+        if val is not None:
+            pytest_assert(
+                "tacacs+" in val and "local" in val,
+                "CONFIG_DB accounting login should contain tacacs+ and local, got: {}".format(val)
+            )
+
     def test_klish_no_failthrough(self, duthost, mgmt_framework_available):
         set_aaa_config(duthost, "authentication", "failthrough", "True")
         result = run_klish_command(duthost, "configure terminal\nno aaa authentication failthrough\nexit")
@@ -556,23 +650,45 @@ class TestAAAKlishCLI:
         pytest_assert(val is None or val == "",
                       "CONFIG_DB failthrough should be unset after 'no' command, got: {}".format(val))
 
-    def test_klish_config_authorization(self, duthost, mgmt_framework_available):
-        result = run_klish_command(
-            duthost,
-            "configure terminal\naaa authorization tacacs+ local\nexit"
-        )
-        logger.info("Klish authorization: rc=%s", result['rc'])
+    def test_klish_no_fallback(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "fallback", "True")
+        result = run_klish_command(duthost, "configure terminal\nno aaa authentication fallback\nexit")
+        logger.info("Klish no fallback: rc=%s", result['rc'])
         if result['rc'] != 0:
             pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "fallback")
+        pytest_assert(val is None or val == "",
+                      "CONFIG_DB fallback should be unset after 'no' command, got: {}".format(val))
 
-    def test_klish_config_accounting(self, duthost, mgmt_framework_available):
-        result = run_klish_command(
-            duthost,
-            "configure terminal\naaa accounting tacacs+ local\nexit"
-        )
-        logger.info("Klish accounting: rc=%s", result['rc'])
+    def test_klish_no_debug(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "debug", "True")
+        result = run_klish_command(duthost, "configure terminal\nno aaa authentication debug\nexit")
+        logger.info("Klish no debug: rc=%s", result['rc'])
         if result['rc'] != 0:
             pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "debug")
+        pytest_assert(val is None or val == "",
+                      "CONFIG_DB debug should be unset after 'no' command, got: {}".format(val))
+
+    def test_klish_no_trace(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "trace", "True")
+        result = run_klish_command(duthost, "configure terminal\nno aaa authentication trace\nexit")
+        logger.info("Klish no trace: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "trace")
+        pytest_assert(val is None or val == "",
+                      "CONFIG_DB trace should be unset after 'no' command, got: {}".format(val))
+
+    def test_klish_no_login(self, duthost, mgmt_framework_available):
+        set_aaa_config(duthost, "authentication", "login", "tacacs+,local")
+        result = run_klish_command(duthost, "configure terminal\nno aaa authentication login\nexit")
+        logger.info("Klish no login: rc=%s", result['rc'])
+        if result['rc'] != 0:
+            pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authentication", "login")
+        pytest_assert(val is None or val == "",
+                      "CONFIG_DB login should be unset after 'no' command, got: {}".format(val))
 
     def test_klish_no_authorization(self, duthost, mgmt_framework_available):
         set_aaa_config(duthost, "authorization", "login", "tacacs+")
@@ -580,6 +696,9 @@ class TestAAAKlishCLI:
         logger.info("Klish no authorization: rc=%s", result['rc'])
         if result['rc'] != 0:
             pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "authorization", "login")
+        pytest_assert(val is None or val == "",
+                      "CONFIG_DB authorization login should be unset after 'no' command, got: {}".format(val))
 
     def test_klish_no_accounting(self, duthost, mgmt_framework_available):
         set_aaa_config(duthost, "accounting", "login", "tacacs+")
@@ -587,6 +706,9 @@ class TestAAAKlishCLI:
         logger.info("Klish no accounting: rc=%s", result['rc'])
         if result['rc'] != 0:
             pytest.skip("Klish CLI not available")
+        val = get_aaa_table_field(duthost, "accounting", "login")
+        pytest_assert(val is None or val == "",
+                      "CONFIG_DB accounting login should be unset after 'no' command, got: {}".format(val))
 
 
 class TestAAAFullWorkflow:
