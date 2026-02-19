@@ -1,0 +1,347 @@
+# PR Test Pipeline for sonic-mgmt (Local KVM Execution)
+#
+# This pipeline replaces the Elastictest-based pr_test_template.yml with
+# local KVM test execution on the sonic-build agent pool.
+#
+# It keeps the smart impacted-area detection logic:
+# - Analyzes git diff to determine which test areas are affected by a PR
+# - Maps changed folders to specific test scripts per topology
+# - Only runs tests for impacted topologies
+#
+# Key differences from Elastictest-based pipeline:
+# - Runs on sonic-build pool (self-hosted sonic-build-01) instead of sonic-ubuntu-1c
+# - Executes tests locally via kvmtest.sh / run_tests.sh instead of Elastictest API
+# - No dependency on SONiC-Elastictest variable group or managed identity
+# - No Kusto-based dynamic instance calculation (single worker per topology)
+# - Topology jobs run sequentially (single agent) instead of in parallel
+#
+# ADO Setup:
+#   1. Create a new pipeline in the SONiC project pointing to this YAML
+#      file in the sonic-mgmt repo (arthur-cog-sonic/sonic-mgmt).
+#   2. To enable PR triggers:
+#      - Go to Project Settings > Repos > sonic-mgmt > Branch Policies > master
+#      - Add a Build Validation policy referencing this pipeline
+#   3. Ensure the sonic-build agent pool has sonic-build-01 online.
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - master
+      - 202???
+  paths:
+    exclude:
+      - .github
+      - docs
+
+name: $(TeamProject)_$(Build.DefinitionName)_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+  - repository: buildimage
+    type: github
+    name: arthur-cog-sonic/sonic-buildimage
+    endpoint: arthur-cog-sonic
+    ref: master
+
+parameters:
+- name: BUILD_REASON
+  type: string
+  default: "PullRequest"
+
+- name: STOP_ON_FAILURE
+  type: string
+  default: "True"
+
+- name: RETRY_TIMES
+  type: string
+  default: "2"
+
+- name: MAX_RUN_TEST_MINUTES
+  type: number
+  default: 480
+
+# Keys: "dpu_checker","dualtor_checker","t0-2vlans_checker","t0-sonic_checker","t0_checker","t1-multi-asic_checker","t1_checker","t2_checker"
+# Example: {"t0_checker": ["bgp/test_bgp_command.py"], "t1_checker": ["bgp/test_bgp_fact.py"]}
+- name: IMPACT_AREA_INFO
+  type: object
+  default: {}
+
+variables:
+- name: BUILD_BRANCH
+  ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+    value: $(System.PullRequest.TargetBranch)
+  ${{ else }}:
+    value: $(Build.SourceBranchName)
+
+stages:
+- stage: Test
+  pool: sonic-build
+  jobs:
+
+    # ----------------------------------------------------------------
+    # Job 1: Determine impacted test areas from the PR diff
+    # ----------------------------------------------------------------
+    - job: get_impacted_area
+      displayName: "Get impacted area"
+      timeoutInMinutes: 20
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - template: impacted_area_testing/get-impacted-area.yml
+          parameters:
+            BUILD_BRANCH: $(BUILD_BRANCH)
+            IMPACT_AREA_INFO: ${{ parameters.IMPACT_AREA_INFO }}
+
+    # ----------------------------------------------------------------
+    # Job 2: t0 topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_t0
+      displayName: "kvmtest-t0 (local)"
+      dependsOn:
+      - get_impacted_area
+      condition: contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 't0_checker')
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."t0_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract t0 test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: t0
+            SCRIPTS: $(SCRIPTS)
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            COMMON_EXTRA_PARAMS: "--disable_sai_validation "
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+
+    # ----------------------------------------------------------------
+    # Job 3: t0-2vlans topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_t0_2vlans
+      displayName: "kvmtest-t0-2vlans (local)"
+      dependsOn:
+      - get_impacted_area
+      - local_kvmtest_t0
+      condition: and(not(canceled()), contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 't0-2vlans_checker'))
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."t0-2vlans_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract t0-2vlans test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: t0
+            SCRIPTS: $(SCRIPTS)
+            DEPLOY_MG_EXTRA_PARAMS: "-e vlan_config=two_vlan_a"
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            COMMON_EXTRA_PARAMS: "--disable_sai_validation "
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+
+    # ----------------------------------------------------------------
+    # Job 4: t1-lag topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_t1_lag
+      displayName: "kvmtest-t1-lag (local)"
+      dependsOn:
+      - get_impacted_area
+      - local_kvmtest_t0_2vlans
+      condition: and(not(canceled()), contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 't1_checker'))
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."t1_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract t1 test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: t1-lag
+            SCRIPTS: $(SCRIPTS)
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            COMMON_EXTRA_PARAMS: "--disable_sai_validation "
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+
+    # ----------------------------------------------------------------
+    # Job 5: dualtor topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_dualtor
+      displayName: "kvmtest-dualtor (local)"
+      dependsOn:
+      - get_impacted_area
+      - local_kvmtest_t1_lag
+      condition: and(not(canceled()), contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 'dualtor_checker'))
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."dualtor_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract dualtor test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: dualtor
+            SCRIPTS: $(SCRIPTS)
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            COMMON_EXTRA_PARAMS: "--disable_loganalyzer --disable_sai_validation "
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+
+    # ----------------------------------------------------------------
+    # Job 6: t0-sonic topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_t0_sonic
+      displayName: "kvmtest-t0-sonic (local)"
+      dependsOn:
+      - get_impacted_area
+      - local_kvmtest_dualtor
+      condition: and(not(canceled()), contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 't0-sonic_checker'))
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."t0-sonic_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract t0-sonic test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: t0-64-32
+            SCRIPTS: $(SCRIPTS)
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            VM_TYPE: vsonic
+            COMMON_EXTRA_PARAMS: "--neighbor_type=sonic --disable_sai_validation "
+            SPECIFIC_PARAM: '[
+                {"name": "bgp/test_bgp_fact.py", "param": "--neighbor_type=sonic --enable_macsec --macsec_profile=128_SCI,256_XPN_SCI"},
+                {"name": "macsec", "param": "--neighbor_type=sonic --enable_macsec --macsec_profile=128_SCI,256_XPN_SCI"}
+              ]'
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+
+    # ----------------------------------------------------------------
+    # Job 7: multi-asic t1 topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_multi_asic_t1
+      displayName: "kvmtest-multi-asic-t1 (local)"
+      dependsOn:
+      - get_impacted_area
+      - local_kvmtest_t0_sonic
+      condition: and(not(canceled()), contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 't1_checker'))
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."t1_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract multi-asic t1 test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: t1-8-lag
+            SCRIPTS: $(SCRIPTS)
+            NUM_ASIC: 4
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            COMMON_EXTRA_PARAMS: "--disable_sai_validation "
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+
+    # ----------------------------------------------------------------
+    # Job 8: t2 topology tests
+    # ----------------------------------------------------------------
+    - job: local_kvmtest_t2
+      displayName: "kvmtest-t2 (local)"
+      dependsOn:
+      - get_impacted_area
+      - local_kvmtest_multi_asic_t1
+      condition: and(not(canceled()), contains(dependencies.get_impacted_area.outputs['SetVariableTask.PR_CHECKERS'], 't2_checker'))
+      variables:
+        TEST_SCRIPTS: $[ dependencies.get_impacted_area.outputs['SetVariableTask.TEST_SCRIPTS'] ]
+      timeoutInMinutes: ${{ parameters.MAX_RUN_TEST_MINUTES }}
+      continueOnError: false
+      steps:
+        - checkout: self
+          displayName: "Checkout sonic-mgmt"
+
+        - script: |
+            set -x
+            echo "$TEST_SCRIPTS" > /tmp/ts.json
+            SCRIPTS=$(jq -r -c '."t2_checker"' /tmp/ts.json | jq -r '. | join(",")')
+            rm /tmp/ts.json
+            echo "##vso[task.setvariable variable=SCRIPTS]$SCRIPTS"
+          displayName: "Extract t2 test scripts"
+
+        - template: run-test-local-template.yml
+          parameters:
+            TOPOLOGY: t2
+            SCRIPTS: $(SCRIPTS)
+            STOP_ON_FAILURE: ${{ parameters.STOP_ON_FAILURE }}
+            RETRY_TIMES: ${{ parameters.RETRY_TIMES }}
+            MGMT_BRANCH: $(BUILD_BRANCH)
+            COMMON_EXTRA_PARAMS: "--disable_sai_validation "
+            MAX_RUN_TEST_MINUTES: ${{ parameters.MAX_RUN_TEST_MINUTES }}
