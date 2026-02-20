@@ -177,23 +177,44 @@ steps:
       username=$(id -un)
       SONIC_MGMT_DIR=/data/sonic-mgmt
 
-      sudo rm -rf $SONIC_MGMT_DIR
-      sudo mkdir -p $SONIC_MGMT_DIR
-      sudo cp -rf $(Build.SourcesDirectory)/* $SONIC_MGMT_DIR/ 2>/dev/null || true
-      sudo cp -rf $(Build.SourcesDirectory)/.* $SONIC_MGMT_DIR/ 2>/dev/null || true
+      # For Option A (persistent testbed), reuse existing sonic-mgmt repo on the agent.
+      # Only create from scratch if missing. $(Build.SourcesDirectory) is sonic-buildimage
+      # (the primary repo), NOT sonic-mgmt, so we must not blindly copy it over.
+      if [ -d "$SONIC_MGMT_DIR/tests" ] && [ -f "$SONIC_MGMT_DIR/tests/run_tests.sh" ]; then
+        echo "##[section]Reusing existing sonic-mgmt repo at $SONIC_MGMT_DIR"
+        # Pull latest changes if it's a git repo
+        if [ -d "$SONIC_MGMT_DIR/.git" ]; then
+          cd $SONIC_MGMT_DIR
+          sudo -u $username git pull --ff-only 2>/dev/null || true
+        fi
+      else
+        echo "##[warning]No sonic-mgmt repo found at $SONIC_MGMT_DIR, cloning fresh"
+        sudo rm -rf $SONIC_MGMT_DIR
+        sudo mkdir -p $SONIC_MGMT_DIR
+        git clone --depth=1 https://github.com/arthur-cog-sonic/sonic-mgmt.git $SONIC_MGMT_DIR
+      fi
       sudo chown -R $username.$username $SONIC_MGMT_DIR
 
-      docker rm -f sonic-mgmt 2>/dev/null || true
-
-      cd $SONIC_MGMT_DIR
-      if [ -f "./setup-container.sh" ]; then
-        ./setup-container.sh -n sonic-mgmt -d /data -i docker-sonic-mgmt -v
+      # Reuse existing sonic-mgmt container if running, otherwise create one
+      if docker inspect sonic-mgmt >/dev/null 2>&1; then
+        if [ "$(docker inspect -f '{{.State.Running}}' sonic-mgmt)" = "true" ]; then
+          echo "##[section]sonic-mgmt container already running, reusing"
+        else
+          echo "Restarting stopped sonic-mgmt container"
+          docker start sonic-mgmt
+        fi
       else
-        docker run -d --name sonic-mgmt --privileged \
-          -v /data/sonic-vm:/data/sonic-vm \
-          -v /data/sonic-mgmt:/data/sonic-mgmt \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          docker-sonic-mgmt bash -c "while true; do sleep 3600; done"
+        echo "Creating new sonic-mgmt container"
+        cd $SONIC_MGMT_DIR
+        if [ -f "./setup-container.sh" ]; then
+          ./setup-container.sh -n sonic-mgmt -d /data -i docker-sonic-mgmt -v
+        else
+          docker run -d --name sonic-mgmt --privileged \
+            -v /data/sonic-vm:/data/sonic-vm \
+            -v /data/sonic-mgmt:/data/sonic-mgmt \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            docker-sonic-mgmt bash -c "while true; do sleep 3600; done"
+        fi
       fi
 
       docker exec sonic-mgmt bash -c "echo 'sonic-mgmt container is running'"
@@ -279,9 +300,10 @@ steps:
       RUNTEST_OPTS="-i ../ansible/$INVENTORY -d $DUT -n $TBNAME -f $TESTBED_FILE -k debug -l warning -m individual -q 1 -a False -O -r"
       RUNTEST_OPTS="$RUNTEST_OPTS -e --allow_recover -e --completeness_level=confident"
 
-      if [ "$STOP_ON_FAILURE" = "True" ]; then
-        RUNTEST_OPTS="$RUNTEST_OPTS -E"
-      fi
+      # Note: Do NOT pass -E to run_tests.sh. The -E flag enables bash "set -e"
+      # which causes the script to exit prematurely when grep -vE in
+      # setup_test_options() filters out tests matching SKIP_FOLDERS (like k8s/).
+      # The -q 1 flag already handles "stop after 1 failure" at the pytest level.
 
       if [ -n "$COMMON_EXTRA" ]; then
         RUNTEST_OPTS="$RUNTEST_OPTS -e \"$COMMON_EXTRA\""
