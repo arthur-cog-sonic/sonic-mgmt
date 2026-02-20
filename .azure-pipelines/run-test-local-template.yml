@@ -314,15 +314,12 @@ steps:
       if [ "$virsh_version" != "0" ]; then
         mkdir -p $(Build.ArtifactStagingDirectory)/kvmdump
         virsh -c qemu:///system list 2>/dev/null || true
-        virsh -c qemu:///system save $DUT $(Build.ArtifactStagingDirectory)/kvmdump/$DUT.memdmp 2>/dev/null || true
         virsh -c qemu:///system dumpxml $DUT > $(Build.ArtifactStagingDirectory)/kvmdump/$DUT.xml 2>/dev/null || true
         img=$(virsh -c qemu:///system domblklist $DUT 2>/dev/null | grep vda | awk '{print $2}')
         if [ -n "$img" ]; then
           cp $img $(Build.ArtifactStagingDirectory)/kvmdump/$DUT.img 2>/dev/null || true
           gzip $(Build.ArtifactStagingDirectory)/kvmdump/$DUT.img 2>/dev/null || true
         fi
-        sudo gzip $(Build.ArtifactStagingDirectory)/kvmdump/$DUT.memdmp 2>/dev/null || true
-        virsh -c qemu:///system undefine $DUT 2>/dev/null || true
       fi
     displayName: "Collect KVM dump"
     condition: failed()
