@@ -166,7 +166,7 @@ test_t0() {
       generic_config_updater/test_cacl.py \
       generic_config_updater/test_dhcp_relay.py \
       generic_config_updater/test_eth_interface.py \
-      generic_config_updater/test_ipv6.py \
+      generic_config_updater/test_ip_bgp.py \
       generic_config_updater/test_lo_interface.py \
       generic_config_updater/test_monitor_config.py \
       generic_config_updater/test_ntp.py \
